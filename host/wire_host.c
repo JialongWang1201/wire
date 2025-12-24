@@ -140,6 +140,8 @@ int main(int argc, char *argv[])
             tcp_port = atoi(argv[++i]);
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]); return 0;
+        } else if (strcmp(argv[i], "--version") == 0) {
+            printf("wire-host 1.0.0\n"); return 0;
         } else {
             fprintf(stderr, "wire-host: unknown option: %s\n", argv[i]);
             usage(argv[0]); return 1;
