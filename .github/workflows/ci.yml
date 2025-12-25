@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ── Build wire-host on Linux and macOS ─────────────────────────────────────
+  build-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            label: linux-x86_64
+          - runner: macos-14
+            label: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wire-host
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          cc -std=c99 -Wall -Wextra -Werror -O2 \
+            -o build/wire-host \
+            host/wire_host.c \
+            host/wire_serial.c
+          echo "built build/wire-host"
+          ./build/wire-host --version
+
+      - name: Upload wire-host artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-host-${{ matrix.label }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: build/wire-host
+
+  # ── QEMU integration test (Linux only) ─────────────────────────────────────
+  qemu-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain and QEMU
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi \
+            qemu-system-arm \
+            cmake \
+            gdb-multiarch
+          # wire_qemu_test.sh uses arm-none-eabi-gdb; create symlink if needed
+          if ! command -v arm-none-eabi-gdb >/dev/null 2>&1; then
+            sudo ln -s "$(command -v gdb-multiarch)" /usr/local/bin/arm-none-eabi-gdb
+          fi
+
+      - name: Build wire-host
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          cc -std=c99 -Wall -Wextra -Werror -O2 \
+            -o build/wire-host \
+            host/wire_host.c \
+            host/wire_serial.c
+
+      - name: Run QEMU integration test
+        run: |
+          set -euxo pipefail
+          WIRE_HOST_BIN="${GITHUB_WORKSPACE}/build/wire-host" \
+          bash test/wire_qemu_test.sh
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-test-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            build/qemu_test/wire_qemu_test.elf
+            build/qemu_test/gdb_output.txt
+            build/qemu_test/qemu_pty.txt
