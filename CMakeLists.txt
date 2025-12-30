@@ -10,6 +10,8 @@ if(NOT CMAKE_CROSSCOMPILING)
 add_executable(wire_host
   host/wire_host.c
   host/wire_serial.c
+  host/wire_rsp_client.c
+  host/wire_crash.c
 )
 target_compile_options(wire_host PRIVATE -Wall -Wextra -Werror -O2)
 set_target_properties(wire_host PROPERTIES OUTPUT_NAME "wire-host")

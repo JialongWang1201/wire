@@ -35,15 +35,19 @@
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "Usage: %s --port <device> --baud <rate> [--tcp-port <port>]\n"
+        "Usage: %s --port <device> --baud <rate> [--tcp-port <port>] [--dump]\n"
         "\n"
         "  --port      serial device (e.g. /dev/ttyUSB0) or QEMU PTY (e.g. /dev/pts/3)\n"
         "  --baud      baud rate (e.g. 115200); use 0 for PTY/virtual devices\n"
         "  --tcp-port  TCP port for GDB to connect to (default: %d)\n"
+        "  --dump      read crash state via RSP and output JSON to stdout, then exit\n"
         "\n"
         "Example (hardware):\n"
         "  wire-host --port /dev/ttyUSB0 --baud 115200\n"
         "  arm-none-eabi-gdb firmware.elf -ex 'target remote :3333'\n"
+        "\n"
+        "Example (crash dump — no GDB required):\n"
+        "  wire-host --port /dev/ttyUSB0 --baud 115200 --dump\n"
         "\n"
         "Example (QEMU):\n"
         "  qemu-system-arm -M mps2-an385 -kernel firmware.elf -serial pty\n"
@@ -127,9 +131,10 @@ static void proxy_loop(int gdb_fd, int uart_fd)
 
 int main(int argc, char *argv[])
 {
-    const char *port    = NULL;
-    int         baud    = -1;
+    const char *port     = NULL;
+    int         baud     = -1;
     int         tcp_port = DEFAULT_TCP;
+    int         dump     = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
@@ -138,6 +143,8 @@ int main(int argc, char *argv[])
             baud = atoi(argv[++i]);
         else if (strcmp(argv[i], "--tcp-port") == 0 && i + 1 < argc)
             tcp_port = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--dump") == 0)
+            dump = 1;
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]); return 0;
         } else if (strcmp(argv[i], "--version") == 0) {
@@ -156,12 +163,19 @@ int main(int argc, char *argv[])
     int uart_fd = wire_serial_open(port, baud);
     if (uart_fd < 0) return 1;
 
-    /* Create TCP server */
+    /* --dump mode: read crash state, output JSON, exit */
+    if (dump) {
+        int rc = wire_dump_crash(uart_fd);
+        close(uart_fd);
+        return rc;
+    }
+
+    /* GDB TCP bridge mode */
     int srv_fd = tcp_listen(tcp_port);
     if (srv_fd < 0) { close(uart_fd); return 1; }
 
-    fprintf(stderr, "wire-host: listening on :%d  (device: %s, baud: %s)\n",
-            tcp_port, port, baud == 0 ? "pty" : argv[0]); /* argv[0] won't show baud, see below */
+    fprintf(stderr, "wire-host: listening on :%d  (device: %s, baud: %d)\n",
+            tcp_port, port, baud);
     fprintf(stderr, "wire-host: connect GDB with:  target remote :%d\n", tcp_port);
     fprintf(stderr, "wire-host: waiting for GDB connection...\n");
 
