@@ -22,7 +22,9 @@ int wire_serial_open(const char *port, int baud);
 #define WIRE_ERR_PARSE    (-5)
 
 /* Maximum stack frames captured by heuristic backtrace */
+#ifndef WIRE_MAX_FRAMES
 #define WIRE_MAX_FRAMES 8
+#endif
 
 /* ── RSP client (wire_rsp_client.c) ─────────────────────────────────────── */
 
@@ -45,5 +47,12 @@ int rsp_transaction(int fd, const char *cmd,
  * Prints JSON to stdout.  Returns 0 on success, 1 on timeout/error.
  */
 int wire_dump_crash(int uart_fd);
+
+/*
+ * Same as wire_dump_crash() but captures JSON into buf instead of stdout.
+ * buf is NUL-terminated.  Returns 0 on success, 1 on timeout/error, -1 on
+ * internal error (e.g. open_memstream failure).
+ */
+int wire_dump_crash_to_buf(int uart_fd, char *buf, size_t buf_size);
 
 #endif /* WIRE_HOST_H */

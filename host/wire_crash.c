@@ -6,7 +6,9 @@
  *   m <SP>,100    → 256 bytes of stack (heuristic backtrace)
  *   m e000ed28,4  → CFSR (Configurable Fault Status Register)
  *
- * Outputs JSON to stdout; returns exit code (0=success, 1=timeout/error).
+ * wire_dump_crash()        — outputs JSON to stdout
+ * wire_dump_crash_to_buf() — captures JSON into caller-supplied buffer
+ * Returns 0 on success, 1 on timeout/error.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -14,6 +16,7 @@
 #include "wire_host.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -200,10 +203,10 @@ static void json_string(FILE *f, const char *s)
 /* ── public API ──────────────────────────────────────────────────────────── */
 
 /*
- * Execute the crash dump sequence on uart_fd.
- * Prints JSON to stdout.  Returns 0 on success, 1 on timeout/error.
+ * Core implementation: execute the crash dump sequence on uart_fd,
+ * writing JSON to fp.  Returns 0 on success, 1 on timeout/error.
  */
-int wire_dump_crash(int uart_fd)
+static int wire_dump_crash_to_fp(int uart_fd, FILE *fp)
 {
     char    resp[RSP_RESP_MAX];
     uint32_t regs[CM_NREGS];
@@ -215,14 +218,13 @@ int wire_dump_crash(int uart_fd)
 
     /* ── 1. halt signal ── */
     if (rsp_transaction(uart_fd, "?", resp, sizeof(resp)) != WIRE_OK) {
-        fprintf(stdout,
-                "{\"halt_signal\":0,\"timeout\":true}\n");
+        fprintf(fp, "{\"halt_signal\":0,\"timeout\":true}\n");
         return 1;
     }
     int sig = parse_halt_signal(resp);
     if (sig < 0) sig = 0;
     if (sig == 0) {
-        fprintf(stdout, "{\"halt_signal\":0,\"timeout\":true}\n");
+        fprintf(fp, "{\"halt_signal\":0,\"timeout\":true}\n");
         return 1;
     }
 
@@ -275,36 +277,63 @@ int wire_dump_crash(int uart_fd)
     }
 
     /* ── 6. emit JSON ── */
-    fprintf(stdout, "{\n");
-    fprintf(stdout, "  \"halt_signal\": %d,\n", sig);
-    fprintf(stdout, "  \"halt_signal_name\": \"%s\",\n", signal_name(sig));
-    fprintf(stdout, "  \"registers\": {\n");
+    fprintf(fp, "{\n");
+    fprintf(fp, "  \"halt_signal\": %d,\n", sig);
+    fprintf(fp, "  \"halt_signal_name\": \"%s\",\n", signal_name(sig));
+    fprintf(fp, "  \"registers\": {\n");
     for (int i = 0; i < CM_NREGS; i++) {
-        fprintf(stdout, "    \"%s\": \"0x%08x\"%s\n",
+        fprintf(fp, "    \"%s\": \"0x%08x\"%s\n",
                 reg_names[i], regs[i],
                 i < CM_NREGS - 1 ? "," : "");
     }
-    fprintf(stdout, "  },\n");
-    fprintf(stdout, "  \"cfsr\": \"0x%08x\",\n", cfsr_val);
-    fprintf(stdout, "  \"cfsr_decoded\": ");
-    json_string(stdout, cfsr_str);
-    fprintf(stdout, ",\n");
-    fprintf(stdout, "  \"stack_frames\": [");
+    fprintf(fp, "  },\n");
+    fprintf(fp, "  \"cfsr\": \"0x%08x\",\n", cfsr_val);
+    fprintf(fp, "  \"cfsr_decoded\": ");
+    json_string(fp, cfsr_str);
+    fprintf(fp, ",\n");
+    fprintf(fp, "  \"stack_frames\": [");
     for (int i = 0; i < nframes; i++) {
-        fprintf(stdout, "%s\"0x%08x\"", i ? ", " : "", frames[i]);
+        fprintf(fp, "%s\"0x%08x\"", i ? ", " : "", frames[i]);
     }
-    fprintf(stdout, "],\n");
+    fprintf(fp, "],\n");
 
     /* stack_dump_hex (first 64 bytes) */
-    fprintf(stdout, "  \"stack_dump_hex\": \"");
+    fprintf(fp, "  \"stack_dump_hex\": \"");
     int dump_len = nframes > 0 ? 64 : 0;  /* only include if backtrace found */
     for (int i = 0; i < dump_len && i < STACK_BYTES; i++)
-        fprintf(stdout, "%02x", stack_bytes[i]);
-    fprintf(stdout, "\",\n");
+        fprintf(fp, "%02x", stack_bytes[i]);
+    fprintf(fp, "\",\n");
 
-    fprintf(stdout, "  \"timestamp\": \"%s\",\n", ts);
-    fprintf(stdout, "  \"wire_version\": \"%s\"\n", WIRE_VERSION);
-    fprintf(stdout, "}\n");
+    fprintf(fp, "  \"timestamp\": \"%s\",\n", ts);
+    fprintf(fp, "  \"wire_version\": \"%s\"\n", WIRE_VERSION);
+    fprintf(fp, "}\n");
 
     return 0;
+}
+
+int wire_dump_crash(int uart_fd)
+{
+    return wire_dump_crash_to_fp(uart_fd, stdout);
+}
+
+int wire_dump_crash_to_buf(int uart_fd, char *buf, size_t buf_size)
+{
+    if (!buf || buf_size == 0) return -1;
+    buf[0] = '\0';
+
+    char  *ptr = NULL;
+    size_t len = 0;
+    FILE  *ms  = open_memstream(&ptr, &len);
+    if (!ms) return -1;
+
+    int rc = wire_dump_crash_to_fp(uart_fd, ms);
+    fclose(ms);  /* flushes and finalises ptr/len */
+
+    if (ptr) {
+        size_t copy = (len < buf_size - 1) ? len : buf_size - 1;
+        memcpy(buf, ptr, copy);
+        buf[copy] = '\0';
+        free(ptr);
+    }
+    return rc;
 }
