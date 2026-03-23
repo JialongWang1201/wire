@@ -21,8 +21,11 @@
 /* ── Weak symbols — user can override individual handlers ─────────────────── */
 
 /* Called from assembly shim with the stacked frame and the manually
- * saved r4-r11.  Signal 11 = SIGSEGV, suitable for HardFault. */
-static void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal)
+ * saved r4-r11.  Signal 11 = SIGSEGV, suitable for HardFault.
+ * Not static: naked inline asm cannot take a proper relocation to a
+ * static (internal-linkage) symbol; hidden visibility keeps it local. */
+__attribute__((visibility("hidden")))
+void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal)
 {
     wire_regs_t regs;
     wire_regs_capture_cm(frame, saved, &regs);
@@ -42,7 +45,7 @@ static void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal)
  *   - Passes the signal number (r2).
  */
 #define WIRE_FAULT_SHIM(name, signal)                                    \
-    __attribute__((naked)) void name(void)                               \
+    __attribute__((naked, weak)) void name(void)                         \
     {                                                                    \
         __asm volatile (                                                  \
             "tst    lr, #4          \n" /* EXC_RETURN[2]: 0=MSP 1=PSP */ \
@@ -60,9 +63,9 @@ static void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal)
         );                                                               \
     }
 
-/* Install override for each Cortex-M fault vector.
- * These are weak aliases — if the application already defines them,
- * it can call wire_debug_loop() manually from its own handler. */
+/* Weak aliases: if the application defines stronger symbols (e.g. in
+ * interrupts.c), the linker selects those.  The app can then call
+ * wire_debug_loop() from its own handler if desired. */
 WIRE_FAULT_SHIM(HardFault_Handler,    11)  /* SIGSEGV */
 WIRE_FAULT_SHIM(MemManage_Handler,    11)
 WIRE_FAULT_SHIM(BusFault_Handler,     11)
