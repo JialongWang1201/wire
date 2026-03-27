@@ -68,7 +68,7 @@ static int read_byte(int fd, uint8_t *out, int timeout_ms)
 
 /* ── send ────────────────────────────────────────────────────────────────── */
 
-static int rsp_send_packet(int fd, const char *data)
+int rsp_send_packet(int fd, const char *data)
 {
     size_t  dlen = strlen(data);
     uint8_t sum  = rsp_checksum(data, dlen);
@@ -144,6 +144,31 @@ static int rsp_recv_packet(int fd, char *out_buf, size_t out_size)
 }
 
 /* ── public API ──────────────────────────────────────────────────────────── */
+
+/*
+ * Block until the target sends a spontaneous stop reply (S or T packet).
+ * Called after 'c' or 's' commands when the target does not reply immediately.
+ *
+ * The target sends $Sxx#cs as soon as DebugMonitor fires and wire_debug_loop
+ * re-enters.  rsp_recv_packet() drains noise/ACK bytes and returns on '$'.
+ *
+ * Retries up to RSP_WAIT_STOP_RETRIES × RSP_TIMEOUT_MS ms total (default 60 s).
+ * Returns WIRE_OK with the stop reply in out_buf, or WIRE_ERR_TIMEOUT.
+ */
+#define RSP_WAIT_STOP_RETRIES 30  /* 30 × 2 s = 60 s */
+
+int rsp_wait_for_stop(int fd, char *out_buf, size_t out_size)
+{
+    for (int i = 0; i < RSP_WAIT_STOP_RETRIES; i++) {
+        int rc = rsp_recv_packet(fd, out_buf, out_size);
+        if (rc == WIRE_ERR_TIMEOUT) continue;
+        if (rc != WIRE_OK) return rc;
+        if (out_buf[0] == 'S' || out_buf[0] == 'T')
+            return WIRE_OK;
+        /* Unexpected packet (stale ACK, etc.) — keep waiting */
+    }
+    return WIRE_ERR_TIMEOUT;
+}
 
 /*
  * Send cmd and receive response, with NAK/retransmit on both sides.

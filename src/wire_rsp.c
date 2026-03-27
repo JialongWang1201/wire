@@ -490,6 +490,18 @@ void wire_debug_loop(const wire_regs_t *regs, int signal)
     s_regs   = *regs;
     s_signal = signal;
 
+    /* Send stop reply immediately so the host's rsp_wait_for_stop() returns
+     * without polling.  For crash analysis (host connects after the fact),
+     * this packet may be missed — the '?' handler still works as a fallback. */
+    if (s_signal != 0) {
+        char reply[4];
+        reply[0] = 'S';
+        reply[1] = s_hex[(s_signal >> 4) & 0xf];
+        reply[2] = s_hex[s_signal & 0xf];
+        reply[3] = '\0';
+        rsp_send_str(reply);
+    }
+
     char pkt[WIRE_PKT_BUF];
 
     for (;;) {

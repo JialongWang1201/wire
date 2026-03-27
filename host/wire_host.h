@@ -29,6 +29,19 @@ int wire_serial_open(const char *port, int baud);
 /* ── RSP client (wire_rsp_client.c) ─────────────────────────────────────── */
 
 /*
+ * Send a single RSP packet ($data#checksum) without waiting for a response.
+ * Used for commands that have no immediate reply ('s' single-step).
+ * Returns WIRE_OK on success.
+ */
+int rsp_send_packet(int fd, const char *data);
+
+/*
+ * Block until the target sends a spontaneous stop reply (S or T packet).
+ * Times out after ~60 s.  Returns WIRE_OK with reply in out_buf.
+ */
+int rsp_wait_for_stop(int fd, char *out_buf, size_t out_size);
+
+/*
  * Send RSP command cmd and receive the server's response into resp_buf.
  * Handles NAK/retransmit on both command and response sides (max 3 retries).
  * Returns WIRE_OK on success.
