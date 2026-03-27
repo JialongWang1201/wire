@@ -97,6 +97,22 @@ static const char s_target_xml[] =
 /* Active comparator addresses; 0 means the slot is free. */
 static uint32_t s_fpb_addr[FPB_MAX_COMP];
 
+/* Data Watchpoint and Trace — DWT (Cortex-M3/M4) */
+#define DWT_CTRL        (*(volatile uint32_t *)0xE0001000u)
+#define DWT_COMP(n)     (*(volatile uint32_t *)(0xE0001020u + (uint32_t)(n) * 0x10u))
+#define DWT_MASK(n)     (*(volatile uint32_t *)(0xE0001024u + (uint32_t)(n) * 0x10u))
+#define DWT_FUNCTION(n) (*(volatile uint32_t *)(0xE0001028u + (uint32_t)(n) * 0x10u))
+/* DWT_FUNCTION bits [3:0]: 4=read, 5=write, 6=read+write */
+#define DWT_MAX_COMP 4u
+
+/* Occupied DWT slots; 0 means free. Stored as addr|1 to distinguish addr 0. */
+static uint32_t s_dwt_slot[DWT_MAX_COMP];
+
+static uint8_t dwt_num_comp(void)
+{
+    return (uint8_t)((DWT_CTRL >> 28) & 0xFu);
+}
+
 static uint8_t fpb_num_comp(void)
 {
     return (uint8_t)((FPB_CTRL >> 4) & 0xFu);
@@ -410,8 +426,34 @@ static int rsp_dispatch(const char *pkt, size_t len)
 #else
             rsp_send_empty();
 #endif
+        } else if (pkt[1] == '2' || pkt[1] == '3' || pkt[1] == '4') {
+#ifdef WIRE_ARCH_CORTEX_M
+            /* Z2=write, Z3=read, Z4=access — DWT hardware watchpoint. */
+            const char *p = pkt + 2;
+            if (*p == ',') p++;
+            uint32_t addr = parse_hex_u32(&p);
+            /* DWT_FUNCTION bits [3:0]: 5=write, 4=read, 6=read+write */
+            uint32_t func = (pkt[1] == '2') ? 5u :
+                            (pkt[1] == '3') ? 4u : 6u;
+            uint8_t  n    = dwt_num_comp();
+            uint8_t  slot;
+            for (slot = 0; slot < n && slot < DWT_MAX_COMP; slot++) {
+                if (s_dwt_slot[slot] == 0) break;
+            }
+            if (slot >= n || slot >= DWT_MAX_COMP) {
+                rsp_send_error(0x0e);
+                break;
+            }
+            s_dwt_slot[slot]   = addr | 1u;  /* bit0=occupied sentinel */
+            DWT_COMP(slot)     = addr;
+            DWT_MASK(slot)     = 0;           /* exact address match */
+            DWT_FUNCTION(slot) = func;
+            rsp_send_ok();
+#else
+            rsp_send_empty();
+#endif
         } else {
-            rsp_send_empty();  /* Z0/Z2/Z3/Z4 not supported */
+            rsp_send_empty();  /* Z0 not supported */
         }
         break;
 
@@ -438,8 +480,30 @@ static int rsp_dispatch(const char *pkt, size_t len)
 #else
             rsp_send_empty();
 #endif
+        } else if (pkt[1] == '2' || pkt[1] == '3' || pkt[1] == '4') {
+#ifdef WIRE_ARCH_CORTEX_M
+            /* z2/z3/z4,addr — clear DWT watchpoint. */
+            const char *p = pkt + 2;
+            if (*p == ',') p++;
+            uint32_t addr = parse_hex_u32(&p);
+            uint8_t  n    = dwt_num_comp();
+            uint8_t  slot;
+            for (slot = 0; slot < n && slot < DWT_MAX_COMP; slot++) {
+                if ((s_dwt_slot[slot] & ~1u) == addr) break;
+            }
+            if (slot < n && slot < DWT_MAX_COMP) {
+                DWT_FUNCTION(slot) = 0;
+                DWT_COMP(slot)     = 0;
+                s_dwt_slot[slot]   = 0;
+                rsp_send_ok();
+            } else {
+                rsp_send_error(0x0e);
+            }
+#else
+            rsp_send_empty();
+#endif
         } else {
-            rsp_send_empty();  /* z0/z2/z3/z4 not supported */
+            rsp_send_empty();  /* z0 not supported */
         }
         break;
 
