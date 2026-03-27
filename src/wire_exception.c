@@ -71,4 +71,63 @@ WIRE_FAULT_SHIM(MemManage_Handler,    11)
 WIRE_FAULT_SHIM(BusFault_Handler,     11)
 WIRE_FAULT_SHIM(UsageFault_Handler,    4)  /* SIGILL */
 
+/* ── DebugMonitor: resumable live-debug entry ────────────────────────────── */
+
+/* DEMCR.MON_STEP (bit 18) — cleared on DebugMonitor entry so a single
+ * 's' command steps exactly one instruction, not indefinitely. */
+#define _DEMCR_REG      (*(volatile uint32_t *)0xE000EDFCu)
+#define _DEMCR_MON_STEP (1u << 18)
+
+/* Like wire_fault_entry() but RETURNS after wire_debug_loop() exits.
+ * DebugMonitor is the only Cortex-M exception that can return normally
+ * (the MCU resumes execution when the handler returns).
+ * Called from WIRE_DEBUG_MON_SHIM — NOT from WIRE_FAULT_SHIM. */
+__attribute__((visibility("hidden")))
+void wire_debug_entry(uint32_t *frame, uint32_t *saved, int signal)
+{
+    _DEMCR_REG &= ~_DEMCR_MON_STEP;   /* clear step flag before blocking */
+    wire_regs_t regs;
+    wire_regs_capture_cm(frame, saved, &regs);
+    wire_debug_loop(&regs, signal);
+    /* Returns here; WIRE_DEBUG_MON_SHIM then pops r4-r11+EXC_RETURN → bx pc */
+}
+
+/* Resumable shim for DebugMonitor_Handler.
+ *
+ * Unlike WIRE_FAULT_SHIM (which ends with "b ." — never returns), this shim
+ * uses "pop {r4-r11, pc}" to restore callee-saved registers and trigger the
+ * Cortex-M exception return mechanism via the saved EXC_RETURN value.
+ *
+ * Stack layout after "push {r4-r11, lr}":
+ *   sp+0  : r4   ← r1 (saved ptr passed to wire_debug_entry)
+ *   sp+4  : r5
+ *   ...
+ *   sp+28 : r11
+ *   sp+32 : lr   (EXC_RETURN — loaded into pc by pop to trigger return)
+ */
+#define WIRE_DEBUG_MON_SHIM(name, signal)                                   \
+    __attribute__((naked, weak)) void name(void)                             \
+    {                                                                        \
+        __asm volatile (                                                      \
+            "tst    lr, #4              \n" /* EXC_RETURN[2]: 0=MSP 1=PSP */ \
+            "ite    eq                  \n"                                   \
+            "mrseq  r0, msp             \n"                                   \
+            "mrsne  r0, psp             \n"                                   \
+            "push   {r4-r11, lr}        \n" /* save callee-saved + EXC_RETURN */ \
+            "mov    r1, sp              \n" /* r1 = pointer to r4-r11        */ \
+            "mov    r2, %0              \n" /* r2 = GDB signal number         */ \
+            "bl     wire_debug_entry    \n"                                   \
+            "pop    {r4-r11, pc}        \n" /* restore + exception return     */ \
+            :                                                                 \
+            : "i"(signal)                                                     \
+            : "r0", "r1", "r2"                                               \
+        );                                                                   \
+    }
+
+/* DebugMonitor fires on:
+ *   - FPBv1 hardware breakpoint match (Z1 comparator)
+ *   - DEMCR.MON_STEP single-step completion
+ * Signal 5 = SIGTRAP (same as GDB breakpoint / step halt). */
+WIRE_DEBUG_MON_SHIM(DebugMonitor_Handler, 5)
+
 #endif /* WIRE_ARCH_CORTEX_M */

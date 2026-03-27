@@ -61,4 +61,21 @@ void wire_init(uint32_t ram_start, uint32_t ram_end);
  */
 void wire_debug_loop(const wire_regs_t *regs, int halt_signal);
 
+/* ── Live debug (Cortex-M3/M4, requires WIRE_LIVE_DEBUG) ────────────────── */
+#ifdef WIRE_ARCH_CORTEX_M
+
+/* Enable FPB and the DebugMonitor exception so that Z1 hardware breakpoints
+ * and 's' single-step can fire.  Called automatically from wire_init() when
+ * WIRE_LIVE_DEBUG is defined; call manually if you opt out of WIRE_LIVE_DEBUG
+ * but still want live debug capability.
+ *
+ * Note: firmware CMakeLists must add
+ *   target_compile_definitions(my_fw PRIVATE WIRE_LIVE_DEBUG=1)
+ * to enable automatic setup.  DebugMonitor priority must not be masked by
+ * BASEPRI/PRIMASK in the application — set it to the lowest priority.
+ */
+void wire_enable_debug_monitor(void);
+
+#endif /* WIRE_ARCH_CORTEX_M */
+
 #endif /* WIRE_H */

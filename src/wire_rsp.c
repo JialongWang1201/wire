@@ -12,8 +12,12 @@
  *   qXfer:features:read:target.xml   target description XML
  *   vMustReplyEmpty  (and all other unknown packets → empty reply)
  *
- * Phase 1 explicitly DOES NOT support: breakpoints, single-step,
- * watchpoints, or multi-threading.
+ * Phase 2 live-debug commands (Cortex-M3/M4 only, requires WIRE_LIVE_DEBUG):
+ *
+ *   s              single-step via DEMCR.MON_STEP — NO immediate reply;
+ *                  stop-reply S05 arrives when DebugMonitor re-enters.
+ *   Z1,addr,4      set FPBv1 hardware breakpoint at addr
+ *   z1,addr,4      clear FPBv1 hardware breakpoint at addr
  *
  * Protocol reference: https://sourceware.org/gdb/current/onlinedocs/gdb/Remote-Protocol.html
  *
@@ -68,6 +72,47 @@ static const char s_target_xml[] =
       "</feature>"
     "</target>";
 #endif
+
+/* ── Cortex-M live debug: DEMCR + FPBv1 registers ───────────────────────── */
+
+#ifdef WIRE_ARCH_CORTEX_M
+
+/* Debug Exception and Monitor Control Register */
+#define DEMCR          (*(volatile uint32_t *)0xE000EDFCu)
+#define DEMCR_MON_EN   (1u << 16)  /* enable DebugMonitor exception */
+#define DEMCR_MON_STEP (1u << 18)  /* single-step on DebugMonitor return */
+
+/* Flash Patch and Breakpoint — FPBv1 (Cortex-M3/M4 only) */
+#define FPB_CTRL  (*(volatile uint32_t *)0xE0002000u)
+#define FPB_COMP0 ((volatile uint32_t *)0xE0002008u)
+#define FPB_CTRL_ENABLE (1u << 0)
+
+/* FPBv1 comparator word: REPLACE=11 (match either halfword), word-aligned addr, ENABLE.
+ * Address 0 is used as the "free slot" sentinel — not a valid breakpoint target. */
+#define FPB_COMP_WORD(addr) ((3u << 30) | ((uint32_t)(addr) & 0x1FFFFFFCu) | 1u)
+
+/* FPBv1 maximum comparators (hardware may have fewer — query FPB_CTRL.NUM_CODE). */
+#define FPB_MAX_COMP 8u
+
+/* Active comparator addresses; 0 means the slot is free. */
+static uint32_t s_fpb_addr[FPB_MAX_COMP];
+
+static uint8_t fpb_num_comp(void)
+{
+    return (uint8_t)((FPB_CTRL >> 4) & 0xFu);
+}
+
+/* Enable FPB and DebugMonitor exception.
+ * Must be called before any Z1 breakpoint can fire DebugMonitor.
+ * Called automatically from wire_init() when WIRE_LIVE_DEBUG is defined. */
+void wire_enable_debug_monitor(void)
+{
+    FPB_CTRL |= FPB_CTRL_ENABLE;
+    DEMCR    |= DEMCR_MON_EN;
+    /* DEMCR.MON_STEP is left clear — set transiently only during 's'. */
+}
+
+#endif /* WIRE_ARCH_CORTEX_M */
 
 /* ── Module state ────────────────────────────────────────────────────────── */
 
@@ -323,10 +368,80 @@ static int rsp_dispatch(const char *pkt, size_t len)
 
     /* ── c — continue ────────────────────────────────────────────────────── */
     case 'c':
-        /* Phase 1: just acknowledge and exit the debug loop.
+        /* Acknowledge and exit the debug loop.
          * The caller is responsible for restoring registers and resuming. */
         rsp_send_str("S00");   /* signal 0 = no signal, just continuing */
         return 1;              /* exit debug loop */
+
+    /* ── s — single-step (Cortex-M DebugMonitor, WIRE_LIVE_DEBUG) ────────── */
+    case 's':
+#ifdef WIRE_ARCH_CORTEX_M
+        /* RSP spec: 's' sends NO immediate reply.
+         * Arm DEMCR.MON_STEP; the CPU executes one instruction after the ISR
+         * returns, then DebugMonitor fires and wire_debug_loop re-enters
+         * sending S05 (SIGTRAP) in response to the host's '?' query. */
+        DEMCR |= DEMCR_MON_STEP;
+        return 1;  /* exit debug loop; ISR returns; MON_STEP fires next */
+#else
+        rsp_send_empty();
+        break;
+#endif
+
+    /* ── Z — set breakpoint / watchpoint ─────────────────────────────────── */
+    case 'Z':
+        if (pkt[1] == '1') {
+#ifdef WIRE_ARCH_CORTEX_M
+            /* Z1,addr,kind — FPBv1 hardware breakpoint (kind ignored). */
+            const char *p = pkt + 2;
+            if (*p == ',') p++;
+            uint32_t addr = parse_hex_u32(&p);
+            uint8_t  n    = fpb_num_comp();
+            uint8_t  slot;
+            for (slot = 0; slot < n && slot < FPB_MAX_COMP; slot++) {
+                if (s_fpb_addr[slot] == 0) break;
+            }
+            if (slot >= n || slot >= FPB_MAX_COMP) {
+                rsp_send_error(0x0e);  /* E0e: no free FPB comparator */
+                break;
+            }
+            s_fpb_addr[slot] = addr;
+            FPB_COMP0[slot]  = FPB_COMP_WORD(addr);
+            rsp_send_ok();
+#else
+            rsp_send_empty();
+#endif
+        } else {
+            rsp_send_empty();  /* Z0/Z2/Z3/Z4 not supported */
+        }
+        break;
+
+    /* ── z — clear breakpoint / watchpoint ───────────────────────────────── */
+    case 'z':
+        if (pkt[1] == '1') {
+#ifdef WIRE_ARCH_CORTEX_M
+            /* z1,addr,kind — clear FPBv1 hardware breakpoint. */
+            const char *p = pkt + 2;
+            if (*p == ',') p++;
+            uint32_t addr = parse_hex_u32(&p);
+            uint8_t  n    = fpb_num_comp();
+            uint8_t  slot;
+            for (slot = 0; slot < n && slot < FPB_MAX_COMP; slot++) {
+                if (s_fpb_addr[slot] == addr) break;
+            }
+            if (slot < n && slot < FPB_MAX_COMP) {
+                FPB_COMP0[slot]  = 0;
+                s_fpb_addr[slot] = 0;
+                rsp_send_ok();
+            } else {
+                rsp_send_error(0x0e);  /* E0e: address not in active BPs */
+            }
+#else
+            rsp_send_empty();
+#endif
+        } else {
+            rsp_send_empty();  /* z0/z2/z3/z4 not supported */
+        }
+        break;
 
     /* ── q — queries ─────────────────────────────────────────────────────── */
     case 'q':
@@ -390,4 +505,7 @@ void wire_init(uint32_t ram_start, uint32_t ram_end)
     s_ram_end   = ram_end;
     /* Exception handlers are installed via weak symbol overrides in
      * wire_exception.c — no dynamic registration needed. */
+#if defined(WIRE_LIVE_DEBUG) && defined(WIRE_ARCH_CORTEX_M)
+    wire_enable_debug_monitor();
+#endif
 }
