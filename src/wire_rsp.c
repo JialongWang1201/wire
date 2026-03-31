@@ -532,6 +532,23 @@ static int rsp_dispatch(const char *pkt, size_t len)
         }
         break;
 
+    /* ── R — reset (software system reset via SCB->AIRCR) ───────────────── */
+    case 'R':
+        /* RSP 'R' packet: software reset.  MCU resets immediately — no reply
+         * is sent.  The host must use rsp_send_packet() (not rsp_transaction)
+         * so it does not block waiting for an ACK that never arrives. */
+#ifdef WIRE_ARCH_CORTEX_M
+        {
+            volatile uint32_t *AIRCR = (volatile uint32_t *)0xE000ED0Cu;
+            /* VECTKEY (0x5FA << 16) | SYSRESETRQ (bit 2) */
+            *AIRCR = (0x5FAu << 16) | (1u << 2);
+            for (;;) {}  /* does not return — MCU resets */
+        }
+#else
+        rsp_send_empty();
+#endif
+        break;
+
     /* ── v — v-packets ───────────────────────────────────────────────────── */
     case 'v':
         /* vMustReplyEmpty and all others: empty reply */
