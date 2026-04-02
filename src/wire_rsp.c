@@ -73,7 +73,7 @@ static const char s_target_xml[] =
     "</target>";
 #endif
 
-/* ── Cortex-M live debug: DEMCR + FPBv1 registers ───────────────────────── */
+/* ── Cortex-M live debug: DEMCR + FPB registers (v1 and v2) ─────────────── */
 
 #ifdef WIRE_ARCH_CORTEX_M
 
@@ -82,22 +82,31 @@ static const char s_target_xml[] =
 #define DEMCR_MON_EN   (1u << 16)  /* enable DebugMonitor exception */
 #define DEMCR_MON_STEP (1u << 18)  /* single-step on DebugMonitor return */
 
-/* Flash Patch and Breakpoint — FPBv1 (Cortex-M3/M4 only) */
+/* Flash Patch and Breakpoint — base registers (same address for v1 and v2) */
 #define FPB_CTRL  (*(volatile uint32_t *)0xE0002000u)
 #define FPB_COMP0 ((volatile uint32_t *)0xE0002008u)
+
+/* FPB_CTRL bits */
 #define FPB_CTRL_ENABLE (1u << 0)
+#define FPB_CTRL_KEY    (1u << 1)  /* FPBv2: write-enable; must be set with ENABLE */
+/* FPB_CTRL.REV field [31:28]: 0 = FPBv1 (M3/M4), 1 = FPBv2 (M7/M33/M35P) */
+#define FPB_REV(ctrl)   (((ctrl) >> 28) & 0xFu)
 
-/* FPBv1 comparator word: REPLACE=11 (match either halfword), word-aligned addr, ENABLE.
- * Address 0 is used as the "free slot" sentinel — not a valid breakpoint target. */
-#define FPB_COMP_WORD(addr) ((3u << 30) | ((uint32_t)(addr) & 0x1FFFFFFCu) | 1u)
+/* FPBv1 comparator word: REPLACE=11 (breakpoint on either halfword),
+ * word-aligned address in bits [28:2], ENABLE in bit [0]. */
+#define FPB_COMP_WORD_V1(addr) ((3u << 30) | ((uint32_t)(addr) & 0x1FFFFFFCu) | 1u)
 
-/* FPBv1 maximum comparators (hardware may have fewer — query FPB_CTRL.NUM_CODE). */
+/* FPBv2 comparator word: address in bits [31:1] (2-byte aligned), ENABLE in bit [0].
+ * No REPLACE field; the FPB always generates a DebugMonitor event. */
+#define FPB_COMP_WORD_V2(addr) ((uint32_t)(addr) | 1u)
+
+/* Maximum comparators tracked (hardware reports actual count via FPB_CTRL.NUM_CODE). */
 #define FPB_MAX_COMP 8u
 
 /* Active comparator addresses; 0 means the slot is free. */
 static uint32_t s_fpb_addr[FPB_MAX_COMP];
 
-/* Data Watchpoint and Trace — DWT (Cortex-M3/M4) */
+/* Data Watchpoint and Trace — DWT (same registers on M3/M4/M7/M33) */
 #define DWT_CTRL        (*(volatile uint32_t *)0xE0001000u)
 #define DWT_COMP(n)     (*(volatile uint32_t *)(0xE0001020u + (uint32_t)(n) * 0x10u))
 #define DWT_MASK(n)     (*(volatile uint32_t *)(0xE0001024u + (uint32_t)(n) * 0x10u))
@@ -115,16 +124,25 @@ static uint8_t dwt_num_comp(void)
 
 static uint8_t fpb_num_comp(void)
 {
+    /* NUM_CODE field is bits [7:4] in both FPBv1 and FPBv2. */
     return (uint8_t)((FPB_CTRL >> 4) & 0xFu);
 }
 
 /* Enable FPB and DebugMonitor exception.
+ * Detects FPB revision at runtime: FPBv2 (M7/M33) requires KEY=1 alongside
+ * ENABLE=1 in the same write; a read-modify-write is not sufficient.
  * Must be called before any Z1 breakpoint can fire DebugMonitor.
  * Called automatically from wire_init() when WIRE_LIVE_DEBUG is defined. */
 void wire_enable_debug_monitor(void)
 {
-    FPB_CTRL |= FPB_CTRL_ENABLE;
-    DEMCR    |= DEMCR_MON_EN;
+    if (FPB_REV(FPB_CTRL) != 0u) {
+        /* FPBv2: write KEY=1 and ENABLE=1 in a single store. */
+        FPB_CTRL = FPB_CTRL_KEY | FPB_CTRL_ENABLE;
+    } else {
+        /* FPBv1: simple OR-enable. */
+        FPB_CTRL |= FPB_CTRL_ENABLE;
+    }
+    DEMCR |= DEMCR_MON_EN;
     /* DEMCR.MON_STEP is left clear — set transiently only during 's'. */
 }
 
@@ -407,7 +425,8 @@ static int rsp_dispatch(const char *pkt, size_t len)
     case 'Z':
         if (pkt[1] == '1') {
 #ifdef WIRE_ARCH_CORTEX_M
-            /* Z1,addr,kind — FPBv1 hardware breakpoint (kind ignored). */
+            /* Z1,addr,kind — FPB hardware breakpoint (kind ignored).
+             * Selects FPBv1 or FPBv2 comparator word format at runtime. */
             const char *p = pkt + 2;
             if (*p == ',') p++;
             uint32_t addr = parse_hex_u32(&p);
@@ -421,7 +440,9 @@ static int rsp_dispatch(const char *pkt, size_t len)
                 break;
             }
             s_fpb_addr[slot] = addr;
-            FPB_COMP0[slot]  = FPB_COMP_WORD(addr);
+            FPB_COMP0[slot]  = (FPB_REV(FPB_CTRL) != 0u)
+                               ? FPB_COMP_WORD_V2(addr)
+                               : FPB_COMP_WORD_V1(addr);
             rsp_send_ok();
 #else
             rsp_send_empty();

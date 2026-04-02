@@ -125,7 +125,7 @@ void wire_debug_entry(uint32_t *frame, uint32_t *saved, int signal)
     }
 
 /* DebugMonitor fires on:
- *   - FPBv1 hardware breakpoint match (Z1 comparator)
+ *   - FPB hardware breakpoint match (Z1 comparator; FPBv1 on M3/M4, FPBv2 on M7/M33)
  *   - DEMCR.MON_STEP single-step completion
  * Signal 5 = SIGTRAP (same as GDB breakpoint / step halt). */
 WIRE_DEBUG_MON_SHIM(DebugMonitor_Handler, 5)
