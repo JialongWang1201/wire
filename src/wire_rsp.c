@@ -78,9 +78,10 @@ static const char s_target_xml[] =
 #ifdef WIRE_ARCH_CORTEX_M
 
 /* Debug Exception and Monitor Control Register */
-#define DEMCR          (*(volatile uint32_t *)0xE000EDFCu)
-#define DEMCR_MON_EN   (1u << 16)  /* enable DebugMonitor exception */
-#define DEMCR_MON_STEP (1u << 18)  /* single-step on DebugMonitor return */
+#define DEMCR           (*(volatile uint32_t *)0xE000EDFCu)
+#define DEMCR_MON_EN    (1u << 16)  /* enable DebugMonitor exception */
+#define DEMCR_MON_PEND  (1u << 17)  /* pend DebugMonitor (soft-halt break-in) */
+#define DEMCR_MON_STEP  (1u << 18)  /* single-step on DebugMonitor return */
 
 /* Flash Patch and Breakpoint — base registers (same address for v1 and v2) */
 #define FPB_CTRL  (*(volatile uint32_t *)0xE0002000u)
@@ -144,6 +145,28 @@ void wire_enable_debug_monitor(void)
     }
     DEMCR |= DEMCR_MON_EN;
     /* DEMCR.MON_STEP is left clear — set transiently only during 's'. */
+}
+
+/* ── Break-in: soft-halt a running MCU from the host ────────────────────── */
+
+/* Weak default: non-blocking UART read.  Override in your BSP to enable
+ * wire_poll_break_in().  The default always returns 0 (no byte available). */
+__attribute__((weak)) int wire_uart_try_read(uint8_t *byte)
+{
+    (void)byte;
+    return 0;
+}
+
+/* Poll for a Ctrl-C (0x03) break-in byte from the host.
+ * When detected, pends DebugMonitor so the CPU halts at the next opportunity.
+ * Call from your main loop or RTOS idle task.
+ * Requires wire_uart_try_read() to be overridden (default does nothing). */
+void wire_poll_break_in(void)
+{
+    uint8_t b;
+    if (wire_uart_try_read(&b) && b == 0x03u) {
+        DEMCR |= DEMCR_MON_EN | DEMCR_MON_PEND;
+    }
 }
 
 #endif /* WIRE_ARCH_CORTEX_M */
