@@ -18,6 +18,10 @@ set_target_properties(wire_host PROPERTIES OUTPUT_NAME "wire-host")
 
 enable_testing()
 
+add_executable(wire_rsp_qxfer_test test/wire_rsp_qxfer_test.c)
+target_compile_options(wire_rsp_qxfer_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rsp_qxfer_bounds COMMAND wire_rsp_qxfer_test)
+
 endif()
 
 # ── Firmware library (cross-compiled for target) ─────────────────────────

@@ -349,6 +349,7 @@ static void handle_qxfer_features(const char *annex, uint32_t offset, uint32_t l
     if (avail > length) avail = length;
 
     char buf[WIRE_PKT_BUF];
+    if (avail > sizeof(buf) - 1u) avail = sizeof(buf) - 1u;
     buf[0] = (avail + offset < total) ? 'm' : 'l';   /* 'm'=more, 'l'=last */
     memcpy(buf + 1, s_target_xml + offset, avail);
     rsp_send(buf, 1 + avail);
