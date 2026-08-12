@@ -27,6 +27,7 @@
 #include "../include/wire.h"
 #include "../include/wire_regs.h"
 #include "../include/wire_arch.h"
+#include "wire_rsp_parser.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -224,13 +225,16 @@ static size_t rsp_recv(char *buf)
         /* Accumulate packet data until '#' */
         size_t   len = 0;
         uint8_t  sum = 0;
+        int      overflow = 0;
         while (1) {
             c = rsp_getc();
             if (c == '#') break;
             if (len < WIRE_PKT_BUF - 1) {
                 buf[len++] = (char)c;
-                sum += c;
+            } else {
+                overflow = 1;
             }
+            sum += c;
         }
         buf[len] = '\0';
 
@@ -240,7 +244,7 @@ static size_t rsp_recv(char *buf)
         cs[1] = (char)rsp_getc();
         uint8_t expected = (uint8_t)((hex_nibble(cs[0]) << 4) | hex_nibble(cs[1]));
 
-        if (sum == expected) {
+        if (!overflow && sum == expected) {
             uint8_t ack = '+';
             rsp_putbuf(&ack, 1);
             return len;
@@ -313,10 +317,8 @@ static uint32_t parse_hex_u32(const char **p)
 static int mem_read_safe(uint32_t addr, size_t len, char *out)
 {
     /* Bounds check: only allow reads within [ram_start, ram_end) */
-    if (s_ram_start != 0 || s_ram_end != 0) {
-        if (addr < s_ram_start || (addr + len) > s_ram_end)
-            return -1;
-    }
+    if (!wire_rsp_range_is_allowed(s_ram_start, s_ram_end, addr, len))
+        return -1;
     const uint8_t *src = (const uint8_t *)(uintptr_t)addr;
     for (size_t i = 0; i < len; i++) {
         *out++ = s_hex[src[i] >> 4];
@@ -327,10 +329,8 @@ static int mem_read_safe(uint32_t addr, size_t len, char *out)
 
 static int mem_write_safe(uint32_t addr, size_t len, const char *hex)
 {
-    if (s_ram_start != 0 || s_ram_end != 0) {
-        if (addr < s_ram_start || (addr + len) > s_ram_end)
-            return -1;
-    }
+    if (!wire_rsp_range_is_allowed(s_ram_start, s_ram_end, addr, len))
+        return -1;
     uint8_t *dst = (uint8_t *)(uintptr_t)addr;
     for (size_t i = 0; i < len; i++)
         dst[i] = hex_byte(hex + i * 2);
@@ -364,8 +364,6 @@ static void handle_qxfer_features(const char *annex, uint32_t offset, uint32_t l
 /* Returns 1 if the debug loop should exit (resume execution). */
 static int rsp_dispatch(const char *pkt, size_t len)
 {
-    (void)len;
-
     switch (pkt[0]) {
 
     /* ── ? — halt reason ─────────────────────────────────────────────────── */
@@ -396,28 +394,29 @@ static int rsp_dispatch(const char *pkt, size_t len)
 
     /* ── m addr,length — read memory ─────────────────────────────────────── */
     case 'm': {
-        const char *p = pkt + 1;
-        uint32_t addr = parse_hex_u32(&p);
-        if (*p == ',') p++;
-        uint32_t rlen = parse_hex_u32(&p);
-        if (rlen > (WIRE_PKT_BUF / 2)) rlen = WIRE_PKT_BUF / 2;
+        wire_rsp_memory_request_t request;
+        if (wire_rsp_parse_memory_read(pkt, len, &request) != 0 ||
+            request.length > (WIRE_PKT_BUF / 2u)) {
+            rsp_send_error(0x01);
+            break;
+        }
 
         char out[WIRE_PKT_BUF];
-        if (mem_read_safe(addr, rlen, out) != 0)
+        if (mem_read_safe(request.address, request.length, out) != 0)
             rsp_send_error(0x0e);  /* EFAULT */
         else
-            rsp_send(out, rlen * 2);
+            rsp_send(out, (size_t)request.length * 2u);
         break;
     }
 
     /* ── M addr,length:data — write memory ───────────────────────────────── */
     case 'M': {
-        const char *p = pkt + 1;
-        uint32_t addr = parse_hex_u32(&p);
-        if (*p == ',') p++;
-        uint32_t wlen = parse_hex_u32(&p);
-        if (*p == ':') p++;
-        if (mem_write_safe(addr, wlen, p) != 0)
+        wire_rsp_memory_request_t request;
+        if (wire_rsp_parse_memory_write(pkt, len, &request) != 0) {
+            rsp_send_error(0x01);
+            break;
+        }
+        if (mem_write_safe(request.address, request.length, request.data) != 0)
             rsp_send_error(0x0e);
         else
             rsp_send_ok();
