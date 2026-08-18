@@ -61,6 +61,9 @@ void wire_init(uint32_t ram_start, uint32_t ram_end);
  */
 void wire_debug_loop(const wire_regs_t *regs, int halt_signal);
 
+/* DebugMonitor entry: returns the register state to restore on resume. */
+void wire_debug_loop_resume(wire_regs_t *regs, int halt_signal);
+
 /* ── Live debug (Cortex-M3/M4/M7/M33, requires WIRE_LIVE_DEBUG) ─────────── */
 #ifdef WIRE_ARCH_CORTEX_M
 

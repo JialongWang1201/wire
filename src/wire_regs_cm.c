@@ -21,6 +21,7 @@
 
 #ifdef WIRE_ARCH_CORTEX_M
 
+#include <stddef.h>
 #include <string.h>
 
 /* ── Internal helpers ────────────────────────────────────────────────────── */
@@ -51,25 +52,44 @@ static uint32_t hex_le_to_u32(const char *in)
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
-void wire_regs_capture_cm(const uint32_t *frame, const uint32_t *saved,
-                           wire_regs_t *out)
+static size_t core_frame_offset(uint32_t exc_return)
 {
+    return (exc_return & (1u << 4)) ? 0u : 18u;
+}
+
+void wire_regs_capture_cm(const uint32_t *frame, const uint32_t *saved,
+                           uint32_t exc_return, wire_regs_t *out)
+{
+    const uint32_t *core = frame + core_frame_offset(exc_return);
     /* Hardware-stacked: r0-r3, r12, lr, pc, xpsr */
-    out->r[0]  = frame[0];
-    out->r[1]  = frame[1];
-    out->r[2]  = frame[2];
-    out->r[3]  = frame[3];
-    out->r[12] = frame[4];
-    out->r[14] = frame[5];  /* lr */
-    out->r[15] = frame[6];  /* pc */
-    out->xpsr  = frame[7];
+    out->r[0]  = core[0];
+    out->r[1]  = core[1];
+    out->r[2]  = core[2];
+    out->r[3]  = core[3];
+    out->r[12] = core[4];
+    out->r[14] = core[5];  /* lr */
+    out->r[15] = core[6];  /* pc */
+    out->xpsr  = core[7];
 
     /* Manually stacked: r4-r11 */
     for (int i = 0; i < 8; i++)
         out->r[4 + i] = saved[i];
 
     /* sp points just above the exception frame */
-    out->r[13] = (uint32_t)(uintptr_t)(frame + 8);
+    out->r[13] = (uint32_t)(uintptr_t)(core + 8 +
+                                     ((core[7] & (1u << 9)) ? 1u : 0u));
+}
+
+void wire_regs_restore_cm(const wire_regs_t *regs, uint32_t *frame,
+                          uint32_t *saved, uint32_t exc_return)
+{
+    uint32_t *core = frame + core_frame_offset(exc_return);
+    core[0] = regs->r[0]; core[1] = regs->r[1];
+    core[2] = regs->r[2]; core[3] = regs->r[3];
+    core[4] = regs->r[12]; core[5] = regs->r[14];
+    core[6] = regs->r[15]; core[7] = regs->xpsr;
+    for (int i = 0; i < 8; i++)
+        saved[i] = regs->r[4 + i];
 }
 
 void wire_regs_to_hex(const wire_regs_t *regs, char *hex)

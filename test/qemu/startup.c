@@ -48,12 +48,12 @@ static void Default_Handler(void) { for (;;) {} }
 
 /* Weak aliases so users only need to define the ones they care about. */
 void NMI_Handler(void)          __attribute__((weak, alias("Default_Handler")));
-void HardFault_Handler(void)    __attribute__((weak, alias("Default_Handler")));
-void MemManage_Handler(void)    __attribute__((weak, alias("Default_Handler")));
-void BusFault_Handler(void)     __attribute__((weak, alias("Default_Handler")));
-void UsageFault_Handler(void)   __attribute__((weak, alias("Default_Handler")));
+extern void HardFault_Handler(void);
+extern void MemManage_Handler(void);
+extern void BusFault_Handler(void);
+extern void UsageFault_Handler(void);
 void SVC_Handler(void)          __attribute__((weak, alias("Default_Handler")));
-void DebugMon_Handler(void)     __attribute__((weak, alias("Default_Handler")));
+extern void DebugMon_Handler(void);
 void PendSV_Handler(void)       __attribute__((weak, alias("Default_Handler")));
 void SysTick_Handler(void)      __attribute__((weak, alias("Default_Handler")));
 

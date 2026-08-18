@@ -217,7 +217,7 @@ static int wire_dump_crash_to_fp(int uart_fd, FILE *fp)
     int      nframes = 0;
 
     /* ── 1. halt signal ── */
-    if (rsp_transaction(uart_fd, "?", resp, sizeof(resp)) != WIRE_OK) {
+    if (rsp_wait_for_stop(uart_fd, resp, sizeof(resp)) != WIRE_OK) {
         fprintf(fp, "{\"halt_signal\":0,\"timeout\":true}\n");
         return 1;
     }
@@ -239,7 +239,7 @@ static int wire_dump_crash_to_fp(int uart_fd, FILE *fp)
     /* ── 3. read stack (heuristic backtrace) ── */
     {
         char cmd[32];
-        snprintf(cmd, sizeof(cmd), "m %x,%x", sp_val, STACK_BYTES);
+        snprintf(cmd, sizeof(cmd), "m%x,%x", sp_val, STACK_BYTES);
         if (rsp_transaction(uart_fd, cmd, resp, sizeof(resp)) == WIRE_OK) {
             int ok = 1;
             size_t resp_len = strlen(resp);
@@ -260,7 +260,7 @@ static int wire_dump_crash_to_fp(int uart_fd, FILE *fp)
     /* ── 4. read CFSR ── */
     {
         char cmd[32];
-        snprintf(cmd, sizeof(cmd), "m %s,4", CFSR_ADDR);
+        snprintf(cmd, sizeof(cmd), "m%s,4", CFSR_ADDR);
         if (rsp_transaction(uart_fd, cmd, resp, sizeof(resp)) == WIRE_OK &&
             strlen(resp) >= 8) {
             parse_le32(resp, &cfsr_val);

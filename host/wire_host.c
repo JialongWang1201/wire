@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,7 +70,7 @@ static int tcp_listen(int port)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port        = htons((uint16_t)port);
 
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -82,6 +83,25 @@ static int tcp_listen(int port)
 }
 
 /* ── Proxy event loop ────────────────────────────────────────────────────── */
+
+static int write_all(int fd, const uint8_t *buf, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = write(fd, buf + done, len - done);
+        if (n > 0) { done += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(fd, &wfds);
+            if (select(fd + 1, NULL, &wfds, NULL, NULL) > 0) continue;
+            if (errno == EINTR) continue;
+        }
+        return -1;
+    }
+    return 0;
+}
 
 static void proxy_loop(int gdb_fd, int uart_fd)
 {
@@ -108,8 +128,9 @@ static void proxy_loop(int gdb_fd, int uart_fd)
                 fprintf(stderr, "wire-host: GDB disconnected\n");
                 break;
             }
-            ssize_t w = write(uart_fd, buf, (size_t)r);
-            if (w != r) { perror("write(uart)"); break; }
+            if (write_all(uart_fd, buf, (size_t)r) != 0) {
+                perror("write(uart)"); break;
+            }
         }
 
         /* UART → GDB */
@@ -121,8 +142,9 @@ static void proxy_loop(int gdb_fd, int uart_fd)
                 break;
             }
             if (r == 0) continue;  /* timeout (VTIME), no data */
-            ssize_t w = write(gdb_fd, buf, (size_t)r);
-            if (w != r) { perror("write(gdb)"); break; }
+            if (write_all(gdb_fd, buf, (size_t)r) != 0) {
+                perror("write(gdb)"); break;
+            }
         }
     }
 }
@@ -159,6 +181,8 @@ int main(int argc, char *argv[])
         usage(argv[0]); return 1;
     }
 
+    signal(SIGPIPE, SIG_IGN);
+
     /* Open serial / PTY */
     int uart_fd = wire_serial_open(port, baud);
     if (uart_fd < 0) return 1;
@@ -174,7 +198,7 @@ int main(int argc, char *argv[])
     int srv_fd = tcp_listen(tcp_port);
     if (srv_fd < 0) { close(uart_fd); return 1; }
 
-    fprintf(stderr, "wire-host: listening on :%d  (device: %s, baud: %d)\n",
+    fprintf(stderr, "wire-host: listening on 127.0.0.1:%d  (device: %s, baud: %d)\n",
             tcp_port, port, baud);
     fprintf(stderr, "wire-host: connect GDB with:  target remote :%d\n", tcp_port);
     fprintf(stderr, "wire-host: waiting for GDB connection...\n");

@@ -3,7 +3,7 @@
  * The assembly shims below are the actual exception vectors. They:
  *   1. Determine which stack pointer was active (MSP or PSP).
  *   2. Push r4-r11 (callee-saved) onto the active stack.
- *   3. Pass (frame_ptr, saved_ptr) to the C handler.
+ *   3. Pass the frame, saved registers and EXC_RETURN to the C handler.
  *
  * After wire_regs_capture_cm() builds the snapshot, control transfers to
  * wire_debug_loop() which never returns (halts in RSP poll loop).
@@ -25,10 +25,11 @@
  * Not static: naked inline asm cannot take a proper relocation to a
  * static (internal-linkage) symbol; hidden visibility keeps it local. */
 __attribute__((visibility("hidden")))
-void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal)
+void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal,
+                      uint32_t exc_return)
 {
     wire_regs_t regs;
-    wire_regs_capture_cm(frame, saved, &regs);
+    wire_regs_capture_cm(frame, saved, exc_return, &regs);
     wire_debug_loop(&regs, signal);
     /* wire_debug_loop never returns in Phase 1 */
     for (;;) {}
@@ -55,11 +56,12 @@ void wire_fault_entry(uint32_t *frame, uint32_t *saved, int signal)
             "push   {r4-r11}        \n" /* save callee-saved on stack   */ \
             "mov    r1, sp          \n" /* r1 = pointer to r4-r11       */ \
             "mov    r2, %0          \n" /* r2 = GDB signal number        */ \
+            "mov    r3, lr          \n" /* r3 = EXC_RETURN               */ \
             "bl     wire_fault_entry\n"                                   \
             "b      .               \n" /* should never reach here       */ \
             :                                                             \
             : "i"(signal)                                                 \
-            : "r0", "r1", "r2"                                           \
+            : "r0", "r1", "r2", "r3"                                     \
         );                                                               \
     }
 
@@ -83,13 +85,14 @@ WIRE_FAULT_SHIM(UsageFault_Handler,    4)  /* SIGILL */
  * (the MCU resumes execution when the handler returns).
  * Called from WIRE_DEBUG_MON_SHIM — NOT from WIRE_FAULT_SHIM. */
 __attribute__((visibility("hidden")))
-void wire_debug_entry(uint32_t *frame, uint32_t *saved, int signal)
+void wire_debug_entry(uint32_t *frame, uint32_t *saved,
+                      uint32_t exc_return)
 {
     _DEMCR_REG &= ~_DEMCR_MON_STEP;   /* clear step flag before blocking */
     wire_regs_t regs;
-    wire_regs_capture_cm(frame, saved, &regs);
-    wire_debug_loop(&regs, signal);
-    /* Returns here; WIRE_DEBUG_MON_SHIM then pops r4-r11+EXC_RETURN → bx pc */
+    wire_regs_capture_cm(frame, saved, exc_return, &regs);
+    wire_debug_loop_resume(&regs, 5);
+    wire_regs_restore_cm(&regs, frame, saved, exc_return);
 }
 
 /* Resumable shim for DebugMonitor_Handler.
@@ -98,14 +101,15 @@ void wire_debug_entry(uint32_t *frame, uint32_t *saved, int signal)
  * uses "pop {r4-r11, pc}" to restore callee-saved registers and trigger the
  * Cortex-M exception return mechanism via the saved EXC_RETURN value.
  *
- * Stack layout after "push {r4-r11, lr}":
+ * Stack layout after alignment padding and "push {r4-r11, lr}":
  *   sp+0  : r4   ← r1 (saved ptr passed to wire_debug_entry)
  *   sp+4  : r5
  *   ...
  *   sp+28 : r11
- *   sp+32 : lr   (EXC_RETURN — loaded into pc by pop to trigger return)
+ *   sp+32 : lr   (EXC_RETURN)
+ *   sp+36 : alignment padding
  */
-#define WIRE_DEBUG_MON_SHIM(name, signal)                                   \
+#define WIRE_DEBUG_MON_SHIM(name)                                           \
     __attribute__((naked, weak)) void name(void)                             \
     {                                                                        \
         __asm volatile (                                                      \
@@ -113,13 +117,16 @@ void wire_debug_entry(uint32_t *frame, uint32_t *saved, int signal)
             "ite    eq                  \n"                                   \
             "mrseq  r0, msp             \n"                                   \
             "mrsne  r0, psp             \n"                                   \
+            "sub    sp, sp, #4         \n" /* preserve 8-byte call alignment */ \
             "push   {r4-r11, lr}        \n" /* save callee-saved + EXC_RETURN */ \
             "mov    r1, sp              \n" /* r1 = pointer to r4-r11        */ \
-            "mov    r2, %0              \n" /* r2 = GDB signal number         */ \
+            "mov    r2, lr              \n" /* r2 = EXC_RETURN                */ \
             "bl     wire_debug_entry    \n"                                   \
-            "pop    {r4-r11, pc}        \n" /* restore + exception return     */ \
+            "pop    {r4-r11, lr}        \n" /* restore registers             */ \
+            "add    sp, sp, #4         \n"                                   \
+            "bx     lr                 \n" /* exception return              */ \
             :                                                                 \
-            : "i"(signal)                                                     \
+            :                                                                 \
             : "r0", "r1", "r2"                                               \
         );                                                                   \
     }
@@ -128,6 +135,6 @@ void wire_debug_entry(uint32_t *frame, uint32_t *saved, int signal)
  *   - FPB hardware breakpoint match (Z1 comparator; FPBv1 on M3/M4, FPBv2 on M7/M33)
  *   - DEMCR.MON_STEP single-step completion
  * Signal 5 = SIGTRAP (same as GDB breakpoint / step halt). */
-WIRE_DEBUG_MON_SHIM(DebugMonitor_Handler, 5)
+WIRE_DEBUG_MON_SHIM(DebugMon_Handler)
 
 #endif /* WIRE_ARCH_CORTEX_M */
