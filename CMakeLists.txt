@@ -18,6 +18,33 @@ set_target_properties(wire_host PROPERTIES OUTPUT_NAME "wire-host")
 
 enable_testing()
 
+add_executable(wire_rsp_qxfer_test test/wire_rsp_qxfer_test.c)
+target_compile_options(wire_rsp_qxfer_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rsp_qxfer_bounds COMMAND wire_rsp_qxfer_test)
+
+add_executable(wire_rsp_memory_test
+  test/wire_rsp_memory_test.c
+)
+target_compile_options(wire_rsp_memory_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rsp_memory_validation COMMAND wire_rsp_memory_test)
+
+option(WIRE_BUILD_FUZZERS "Build libFuzzer protocol targets" OFF)
+if(WIRE_BUILD_FUZZERS)
+  if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "WIRE_BUILD_FUZZERS requires upstream Clang with libFuzzer")
+  endif()
+  add_executable(wire_rsp_memory_fuzz
+    test/wire_rsp_memory_fuzz.c
+  )
+  target_compile_options(wire_rsp_memory_fuzz PRIVATE
+    -fsanitize=fuzzer,address,undefined
+    -fno-omit-frame-pointer
+  )
+  target_link_options(wire_rsp_memory_fuzz PRIVATE
+    -fsanitize=fuzzer,address,undefined
+  )
+endif()
+
 endif()
 
 # ── Firmware library (cross-compiled for target) ─────────────────────────
