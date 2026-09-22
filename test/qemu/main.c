@@ -4,8 +4,8 @@
  * 0x40004000.  This firmware:
  *   1. Initialises UART0 (TX+RX enable via CTRL register).
  *   2. Calls wire_init() to install fault handlers and register RAM bounds.
- *   3. Calls wire_debug_loop() directly — simulating a "crash" so the host
- *      test can connect GDB without needing to trigger a real fault.
+ *   3. Enters the RSP loop, then triggers a real UsageFault/HardFault after
+ *      GDB continues.  The second stop must come through the vector table.
  *
  * Board UART registers (CMSDK APB UART, offset from base 0x40004000):
  *   0x000  DATA  — byte TX/RX
@@ -70,8 +70,16 @@ int main(void)
      */
     wire_init(0x20000000U, 0x20000000U + 256U * 1024U);
 
-    /* Enter GDB stub — the host test connects here. */
-    wire_debug_loop();
+    wire_regs_t regs = {0};
+    uint32_t sp;
+    __asm volatile ("mov %0, sp" : "=r"(sp));
+    regs.r[WIRE_REG_SP] = sp;
+    regs.r[WIRE_REG_PC] = (uint32_t)(uintptr_t)main;
+    regs.xpsr = 1u << 24;
+    wire_debug_loop(&regs, 5);
+
+    /* Must enter a real exception vector after the first 'c' command. */
+    __asm volatile ("udf #0");
 
     for (;;) {}
 }

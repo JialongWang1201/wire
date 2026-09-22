@@ -79,10 +79,9 @@ if [[ "${1:-}" != "--no-build" ]]; then
         echo "==> building wire-host"
         HOST_BUILD="${REPO_ROOT}/build/host_native"
         mkdir -p "${HOST_BUILD}"
-        cc -std=c99 -Wall -Wextra -Werror -O2 \
-            -o "${WIRE_HOST_BIN}" \
-            "${REPO_ROOT}/host/wire_host.c" \
-            "${REPO_ROOT}/host/wire_serial.c"
+        cmake -S "${REPO_ROOT}" -B "${HOST_BUILD}" >/dev/null
+        cmake --build "${HOST_BUILD}" --target wire_host >/dev/null
+        cp "${HOST_BUILD}/wire-host" "${WIRE_HOST_BIN}"
         echo "    wire-host: ${WIRE_HOST_BIN}"
     fi
 fi
@@ -139,6 +138,8 @@ GDB_OUTPUT="${BUILD_DIR}/gdb_output.txt"
     --ex "x/4xw 0x20000000" \
     --ex "set \$r0 = 0xDEADBEEF" \
     --ex "info registers r0" \
+    --ex "continue" \
+    --ex "info registers pc" \
     --ex "disconnect" \
     "${FIRMWARE}" \
     >"${GDB_OUTPUT}" 2>&1 || true
@@ -179,6 +180,12 @@ if grep -q "deadbeef\|0xdeadbeef\|DEADBEEF\|0xDEADBEEF" "${GDB_OUTPUT}"; then
     pass "GDB register write (r0 = 0xDEADBEEF) accepted by stub"
 else
     fail "GDB register write not reflected in output"
+fi
+
+if grep -Eq "Program received signal SIG(ILL|SEGV)" "${GDB_OUTPUT}"; then
+    pass "real fault vector delivered a second stop reply"
+else
+    fail "real fault vector did not deliver a second stop reply"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

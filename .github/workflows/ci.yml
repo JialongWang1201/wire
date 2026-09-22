@@ -21,23 +21,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build wire-host
+      - name: Build and test native targets
         run: |
           set -euxo pipefail
-          mkdir -p build
-          cc -std=c99 -Wall -Wextra -Werror -O2 \
-            -o build/wire-host \
-            host/wire_host.c \
-            host/wire_serial.c
-          echo "built build/wire-host"
-          ./build/wire-host --version
+          cmake -S . -B build/host
+          cmake --build build/host --parallel
+          ctest --test-dir build/host --output-on-failure
+          ./build/host/wire-host --version
 
       - name: Upload wire-host artifact
         uses: actions/upload-artifact@v4
         with:
           name: wire-host-${{ matrix.label }}-${{ github.run_id }}
           if-no-files-found: error
-          path: build/wire-host
+          path: build/host/wire-host
+
+  sanitizers-and-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang
+        run: sudo apt-get update -qq && sudo apt-get install -y clang
+      - name: Run ASan, UBSan and RSP fuzz
+        run: |
+          set -euxo pipefail
+          cmake -S . -B build/san -DCMAKE_C_COMPILER=clang \
+            -DWIRE_ENABLE_SANITIZERS=ON -DWIRE_BUILD_FUZZERS=ON
+          cmake --build build/san --parallel
+          ctest --test-dir build/san --output-on-failure
+          ./build/san/wire_rsp_memory_fuzz -max_total_time=20 test/fuzz_corpus
 
   # ── QEMU integration test (Linux only) ─────────────────────────────────────
   qemu-test:
@@ -64,16 +76,13 @@ jobs:
       - name: Build wire-host
         run: |
           set -euxo pipefail
-          mkdir -p build
-          cc -std=c99 -Wall -Wextra -Werror -O2 \
-            -o build/wire-host \
-            host/wire_host.c \
-            host/wire_serial.c
+          cmake -S . -B build/host
+          cmake --build build/host --target wire_host --parallel
 
       - name: Run QEMU integration test
         run: |
           set -euxo pipefail
-          WIRE_HOST_BIN="${GITHUB_WORKSPACE}/build/wire-host" \
+          WIRE_HOST_BIN="${GITHUB_WORKSPACE}/build/host/wire-host" \
           bash test/wire_qemu_test.sh
 
       - name: Upload test artifacts

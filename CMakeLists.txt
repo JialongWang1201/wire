@@ -28,6 +28,26 @@ add_executable(wire_rsp_memory_test
 target_compile_options(wire_rsp_memory_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME rsp_memory_validation COMMAND wire_rsp_memory_test)
 
+add_executable(wire_regs_cm_test test/wire_regs_cm_test.c src/wire_regs_cm.c)
+target_compile_definitions(wire_regs_cm_test PRIVATE __ARM_ARCH_7M__=1)
+target_compile_options(wire_regs_cm_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME regs_exception_frames COMMAND wire_regs_cm_test)
+
+add_executable(wire_crash_handshake_test test/wire_crash_handshake_test.c
+  host/wire_rsp_client.c host/wire_crash.c)
+target_compile_options(wire_crash_handshake_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME crash_spontaneous_stop COMMAND wire_crash_handshake_test)
+
+option(WIRE_ENABLE_SANITIZERS "Build host tests with ASan and UBSan" OFF)
+if(WIRE_ENABLE_SANITIZERS)
+  foreach(target wire_host wire_rsp_qxfer_test wire_rsp_memory_test
+                 wire_regs_cm_test wire_crash_handshake_test)
+    target_compile_options(${target} PRIVATE -fsanitize=address,undefined
+      -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+  endforeach()
+endif()
+
 option(WIRE_BUILD_FUZZERS "Build libFuzzer protocol targets" OFF)
 if(WIRE_BUILD_FUZZERS)
   if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
@@ -53,6 +73,7 @@ endif()
 #   target_link_libraries(${PROJECT_NAME}.elf PRIVATE wire_firmware)
 #   target_include_directories(${PROJECT_NAME}.elf PRIVATE tools/wire/include)
 
+if(CMAKE_CROSSCOMPILING)
 add_library(wire_firmware OBJECT
   src/wire_rsp.c
   src/wire_regs_cm.c
@@ -64,3 +85,4 @@ target_include_directories(wire_firmware PUBLIC
 target_compile_options(wire_firmware PRIVATE
   -Wall -Wextra -O2
 )
+endif()

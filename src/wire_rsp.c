@@ -94,9 +94,9 @@ static const char s_target_xml[] =
 /* FPB_CTRL.REV field [31:28]: 0 = FPBv1 (M3/M4), 1 = FPBv2 (M7/M33/M35P) */
 #define FPB_REV(ctrl)   (((ctrl) >> 28) & 0xFu)
 
-/* FPBv1 comparator word: REPLACE=11 (breakpoint on either halfword),
- * word-aligned address in bits [28:2], ENABLE in bit [0]. */
-#define FPB_COMP_WORD_V1(addr) ((3u << 30) | ((uint32_t)(addr) & 0x1FFFFFFCu) | 1u)
+/* FPBv1 REPLACE selects the addressed halfword of a 32-bit word. */
+#define FPB_COMP_WORD_V1(addr) ((((addr) & 2u) ? 2u : 1u) << 30 | \
+                                ((uint32_t)(addr) & 0x1FFFFFFCu) | 1u)
 
 /* FPBv2 comparator word: address in bits [31:1] (2-byte aligned), ENABLE in bit [0].
  * No REPLACE field; the FPB always generates a DebugMonitor event. */
@@ -113,11 +113,13 @@ static uint32_t s_fpb_addr[FPB_MAX_COMP];
 #define DWT_COMP(n)     (*(volatile uint32_t *)(0xE0001020u + (uint32_t)(n) * 0x10u))
 #define DWT_MASK(n)     (*(volatile uint32_t *)(0xE0001024u + (uint32_t)(n) * 0x10u))
 #define DWT_FUNCTION(n) (*(volatile uint32_t *)(0xE0001028u + (uint32_t)(n) * 0x10u))
-/* DWT_FUNCTION bits [3:0]: 4=read, 5=write, 6=read+write */
+/* DWT_FUNCTION bits [3:0]: 5=read, 6=write, 7=read+write */
 #define DWT_MAX_COMP 4u
 
-/* Occupied DWT slots; 0 means free. Stored as addr|1 to distinguish addr 0. */
+/* Occupancy is separate because address zero and odd addresses are valid. */
 static uint32_t s_dwt_slot[DWT_MAX_COMP];
+static uint8_t s_dwt_used[DWT_MAX_COMP];
+static uint8_t s_fpb_used[FPB_MAX_COMP];
 
 static uint8_t dwt_num_comp(void)
 {
@@ -128,6 +130,15 @@ static uint8_t fpb_num_comp(void)
 {
     /* NUM_CODE field is bits [7:4] in both FPBv1 and FPBv2. */
     return (uint8_t)((FPB_CTRL >> 4) & 0xFu);
+}
+
+static uint32_t dwt_watch_function(char type)
+{
+    switch (type) {
+    case '2': return 6u; /* write */
+    case '3': return 5u; /* read */
+    default:  return 7u; /* read/write */
+    }
 }
 
 /* Enable FPB and DebugMonitor exception.
@@ -176,6 +187,8 @@ void wire_poll_break_in(void)
 
 static wire_regs_t  s_regs;
 static int          s_signal;
+static int          s_resume_enabled;
+static uint32_t     s_initial_sp;
 static uint32_t     s_ram_start;
 static uint32_t     s_ram_end;
 
@@ -387,10 +400,59 @@ static int rsp_dispatch(const char *pkt, size_t len)
     }
 
     /* ── G — write all registers ─────────────────────────────────────────── */
-    case 'G':
-        wire_regs_from_hex(pkt + 1, &s_regs);
+    case 'G': {
+        if (len != 1u + WIRE_REG_HEX_CHARS) {
+            rsp_send_error(0x01);
+            break;
+        }
+        for (size_t i = 1; i < len; i++) {
+            uint8_t digit;
+            if (wire_rsp_hex_value(pkt[i], &digit) != 0) {
+                rsp_send_error(0x01);
+                return 0;
+            }
+        }
+        wire_regs_t updated;
+        wire_regs_from_hex(pkt + 1, &updated);
+        if (s_resume_enabled && updated.r[WIRE_REG_SP] != s_initial_sp) {
+            rsp_send_error(0x01); /* SP cannot change through exception return. */
+            break;
+        }
+        s_regs = updated;
         rsp_send_ok();
         break;
+    }
+
+    /* ── P reg=value — write one register ──────────────────────────────── */
+    case 'P': {
+        const char *cursor = pkt + 1;
+        const char *end = pkt + len;
+        uint32_t reg;
+        if (wire_rsp_parse_hex_u32(&cursor, end, &reg) != 0 ||
+            cursor == end || *cursor++ != '=' ||
+            reg >= WIRE_REG_COUNT || (size_t)(end - cursor) != 8u) {
+            rsp_send_error(0x01);
+            break;
+        }
+        uint32_t value = 0;
+        for (unsigned byte = 0; byte < 4u; byte++) {
+            uint8_t hi, lo;
+            if (wire_rsp_hex_value(cursor[byte * 2u], &hi) != 0 ||
+                wire_rsp_hex_value(cursor[byte * 2u + 1u], &lo) != 0) {
+                rsp_send_error(0x01);
+                return 0;
+            }
+            value |= (uint32_t)((hi << 4) | lo) << (byte * 8u);
+        }
+        if (s_resume_enabled && reg == WIRE_REG_SP && value != s_initial_sp) {
+            rsp_send_error(0x01);
+            break;
+        }
+        if (reg == 16u) s_regs.xpsr = value;
+        else s_regs.r[reg] = value;
+        rsp_send_ok();
+        break;
+    }
 
     /* ── m addr,length — read memory ─────────────────────────────────────── */
     case 'm': {
@@ -425,10 +487,8 @@ static int rsp_dispatch(const char *pkt, size_t len)
 
     /* ── c — continue ────────────────────────────────────────────────────── */
     case 'c':
-        /* Acknowledge and exit the debug loop.
-         * The caller is responsible for restoring registers and resuming. */
-        rsp_send_str("S00");   /* signal 0 = no signal, just continuing */
-        return 1;              /* exit debug loop */
+        /* GDB waits for the next asynchronous stop reply. */
+        return 1;
 
     /* ── s — single-step (Cortex-M DebugMonitor, WIRE_LIVE_DEBUG) ────────── */
     case 's':
@@ -456,13 +516,14 @@ static int rsp_dispatch(const char *pkt, size_t len)
             uint8_t  n    = fpb_num_comp();
             uint8_t  slot;
             for (slot = 0; slot < n && slot < FPB_MAX_COMP; slot++) {
-                if (s_fpb_addr[slot] == 0) break;
+                if (!s_fpb_used[slot]) break;
             }
             if (slot >= n || slot >= FPB_MAX_COMP) {
                 rsp_send_error(0x0e);  /* E0e: no free FPB comparator */
                 break;
             }
             s_fpb_addr[slot] = addr;
+            s_fpb_used[slot] = 1;
             FPB_COMP0[slot]  = (FPB_REV(FPB_CTRL) != 0u)
                                ? FPB_COMP_WORD_V2(addr)
                                : FPB_COMP_WORD_V1(addr);
@@ -476,19 +537,18 @@ static int rsp_dispatch(const char *pkt, size_t len)
             const char *p = pkt + 2;
             if (*p == ',') p++;
             uint32_t addr = parse_hex_u32(&p);
-            /* DWT_FUNCTION bits [3:0]: 5=write, 4=read, 6=read+write */
-            uint32_t func = (pkt[1] == '2') ? 5u :
-                            (pkt[1] == '3') ? 4u : 6u;
+            uint32_t func = dwt_watch_function(pkt[1]);
             uint8_t  n    = dwt_num_comp();
             uint8_t  slot;
             for (slot = 0; slot < n && slot < DWT_MAX_COMP; slot++) {
-                if (s_dwt_slot[slot] == 0) break;
+                if (!s_dwt_used[slot]) break;
             }
             if (slot >= n || slot >= DWT_MAX_COMP) {
                 rsp_send_error(0x0e);
                 break;
             }
-            s_dwt_slot[slot]   = addr | 1u;  /* bit0=occupied sentinel */
+            s_dwt_slot[slot]   = addr;
+            s_dwt_used[slot]   = 1;
             DWT_COMP(slot)     = addr;
             DWT_MASK(slot)     = 0;           /* exact address match */
             DWT_FUNCTION(slot) = func;
@@ -512,11 +572,12 @@ static int rsp_dispatch(const char *pkt, size_t len)
             uint8_t  n    = fpb_num_comp();
             uint8_t  slot;
             for (slot = 0; slot < n && slot < FPB_MAX_COMP; slot++) {
-                if (s_fpb_addr[slot] == addr) break;
+                if (s_fpb_used[slot] && s_fpb_addr[slot] == addr) break;
             }
             if (slot < n && slot < FPB_MAX_COMP) {
                 FPB_COMP0[slot]  = 0;
                 s_fpb_addr[slot] = 0;
+                s_fpb_used[slot] = 0;
                 rsp_send_ok();
             } else {
                 rsp_send_error(0x0e);  /* E0e: address not in active BPs */
@@ -533,12 +594,13 @@ static int rsp_dispatch(const char *pkt, size_t len)
             uint8_t  n    = dwt_num_comp();
             uint8_t  slot;
             for (slot = 0; slot < n && slot < DWT_MAX_COMP; slot++) {
-                if ((s_dwt_slot[slot] & ~1u) == addr) break;
+                if (s_dwt_used[slot] && s_dwt_slot[slot] == addr) break;
             }
             if (slot < n && slot < DWT_MAX_COMP) {
                 DWT_FUNCTION(slot) = 0;
                 DWT_COMP(slot)     = 0;
                 s_dwt_slot[slot]   = 0;
+                s_dwt_used[slot]   = 0;
                 rsp_send_ok();
             } else {
                 rsp_send_error(0x0e);
@@ -610,10 +672,13 @@ static int rsp_dispatch(const char *pkt, size_t len)
 
 /* ── Public entry point ──────────────────────────────────────────────────── */
 
-void wire_debug_loop(const wire_regs_t *regs, int signal)
+static void wire_debug_loop_impl(const wire_regs_t *regs, int signal,
+                                 wire_regs_t *resume)
 {
     s_regs   = *regs;
     s_signal = signal;
+    s_resume_enabled = resume != NULL;
+    s_initial_sp = regs->r[WIRE_REG_SP];
 
     /* Send stop reply immediately so the host's rsp_wait_for_stop() returns
      * without polling.  For crash analysis (host connects after the fact),
@@ -634,6 +699,19 @@ void wire_debug_loop(const wire_regs_t *regs, int signal)
         if (rsp_dispatch(pkt, len))
             break;
     }
+    if (resume)
+        *resume = s_regs;
+    s_resume_enabled = 0;
+}
+
+void wire_debug_loop(const wire_regs_t *regs, int signal)
+{
+    wire_debug_loop_impl(regs, signal, NULL);
+}
+
+void wire_debug_loop_resume(wire_regs_t *regs, int signal)
+{
+    wire_debug_loop_impl(regs, signal, regs);
 }
 
 void wire_init(uint32_t ram_start, uint32_t ram_end)

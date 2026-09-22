@@ -26,9 +26,15 @@ typedef struct {
  * frame  — pointer to the stacked frame (pushed automatically by hardware):
  *          [r0, r1, r2, r3, r12, lr, pc, xpsr]
  * saved  — pointer to manually saved r4-r11 (pushed in assembly shim)
+ * exc_return — LR on exception entry; bit 4 selects basic/extended FP frame
  */
 void wire_regs_capture_cm(const uint32_t *frame, const uint32_t *saved,
-                           wire_regs_t *out);
+                           uint32_t exc_return, wire_regs_t *out);
+
+/* Write resumable registers back into the exception frame and saved slots.
+ * SP is controlled by exception return and cannot be changed here. */
+void wire_regs_restore_cm(const wire_regs_t *regs, uint32_t *frame,
+                          uint32_t *saved, uint32_t exc_return);
 
 /* Serialise regs into GDB RSP hex string (WIRE_REG_HEX_CHARS chars, no NUL). */
 void wire_regs_to_hex(const wire_regs_t *regs, char *hex);

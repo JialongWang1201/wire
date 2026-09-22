@@ -6,12 +6,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(WIRE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../..")
 
-# ── wire firmware objects (RSP + register capture; no exception shim needed) ─
-# The test calls wire_debug_loop() directly so wire_exception.c (which installs
-# Cortex-M fault handlers via naked assembly) is not required here.
+# ── wire firmware objects, including real fault-vector handlers ─────────────
 add_library(wire_core OBJECT
     ${WIRE_ROOT}/src/wire_rsp.c
     ${WIRE_ROOT}/src/wire_regs_cm.c
+    ${WIRE_ROOT}/src/wire_exception.c
 )
 target_include_directories(wire_core PUBLIC
     ${WIRE_ROOT}/include

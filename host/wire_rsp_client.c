@@ -42,6 +42,26 @@ static int hex_nibble(char c)
     return -1;
 }
 
+static int write_all(int fd, const void *data, size_t len)
+{
+    const uint8_t *buf = (const uint8_t *)data;
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = write(fd, buf + done, len - done);
+        if (n > 0) { done += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(fd, &wfds);
+            if (select(fd + 1, NULL, &wfds, NULL, NULL) > 0) continue;
+            if (errno == EINTR) continue;
+        }
+        return WIRE_ERR_IO;
+    }
+    return WIRE_OK;
+}
+
 /* Read one byte with timeout_ms; returns 1 on success, 0 on timeout, -1 on error. */
 static int read_byte(int fd, uint8_t *out, int timeout_ms)
 {
@@ -76,9 +96,7 @@ int rsp_send_packet(int fd, const char *data)
     int     n    = snprintf(buf, sizeof(buf), "$%s#%02x", data, sum);
     if (n < 0 || (size_t)n >= sizeof(buf)) return WIRE_ERR_OVERFLOW;
 
-    ssize_t w = write(fd, buf, (size_t)n);
-    if (w != (ssize_t)n) return WIRE_ERR_IO;
-    return WIRE_OK;
+    return write_all(fd, buf, (size_t)n);
 }
 
 /* ── receive ─────────────────────────────────────────────────────────────── */
@@ -113,7 +131,7 @@ static int rsp_recv_packet(int fd, char *out_buf, size_t out_size)
         if (r == 0) return WIRE_ERR_TIMEOUT;
         if (c == '#') break;
         if (dlen + 1 >= out_size) {
-            write(fd, "-", 1);
+            (void)write_all(fd, "-", 1);
             return WIRE_ERR_OVERFLOW;
         }
         out_buf[dlen++] = (char)c;
@@ -129,18 +147,17 @@ static int rsp_recv_packet(int fd, char *out_buf, size_t out_size)
     int h = hex_nibble((char)hi);
     int l = hex_nibble((char)lo);
     if (h < 0 || l < 0) {
-        write(fd, "-", 1);
+        (void)write_all(fd, "-", 1);
         return WIRE_ERR_CHECKSUM;
     }
 
     uint8_t expected = (uint8_t)((h << 4) | l);
     if (running_sum != expected) {
-        write(fd, "-", 1);  /* NAK: server will retransmit */
+        (void)write_all(fd, "-", 1);  /* NAK: server will retransmit */
         return WIRE_ERR_CHECKSUM;
     }
 
-    write(fd, "+", 1);  /* ACK */
-    return WIRE_OK;
+    return write_all(fd, "+", 1);  /* ACK */
 }
 
 /* ── public API ──────────────────────────────────────────────────────────── */
