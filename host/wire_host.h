@@ -57,14 +57,16 @@ int rsp_transaction(int fd, const char *cmd,
  *   g  →  all Cortex-M registers
  *   m <SP>,256  →  stack bytes (heuristic backtrace)
  *   m e000ed28,4  →  CFSR
- * Prints JSON to stdout.  Returns 0 on success, 1 on timeout/error.
+ * Prints JSON to stdout. Returns 0 on success, 1 on target timeout/error,
+ * or -1 on output error.
  */
 int wire_dump_crash(int uart_fd);
 
 /*
  * Same as wire_dump_crash() but captures JSON into buf instead of stdout.
- * buf is NUL-terminated.  Returns 0 on success, 1 on timeout/error, -1 on
- * internal error (e.g. open_memstream failure).
+ * buf is NUL-terminated when non-NULL and buf_size > 0.
+ * Returns 0 on success, 1 on target timeout/error, or -1 on invalid buffer,
+ * formatting error, or insufficient capacity. Output errors leave buf empty.
  */
 int wire_dump_crash_to_buf(int uart_fd, char *buf, size_t buf_size);
 
